@@ -1,27 +1,32 @@
 
 import numpy as np
 import torch
+import warnings
 import torch.nn as nn
+import torch.nn.functional as F
+
 
 class BBoxTransform(nn.Module):
-    
+
     def __init__(self, mean=None, std=None):
         super(BBoxTransform, self).__init__()
         if mean is None:
-            self.mean = torch.from_numpy(np.array([0, 0, 0, 0]).astype(np.float32))
+            self.mean = torch.from_numpy(
+                np.array([0, 0, 0, 0]).astype(np.float32))
         else:
             self.mean = mean
         if std is None:
-            self.std = torch.from_numpy(np.array([0.1, 0.1, 0.2, 0.2]).astype(np.float32))
+            self.std = torch.from_numpy(
+                np.array([0.1, 0.1, 0.2, 0.2]).astype(np.float32))
         else:
             self.std = std
 
     def forward(self, boxes, deltas):
 
-        widths  = boxes[:, :, 2] - boxes[:, :, 0]
+        widths = boxes[:, :, 2] - boxes[:, :, 0]
         heights = boxes[:, :, 3] - boxes[:, :, 1]
-        ctr_x   = boxes[:, :, 0] + 0.5 * widths
-        ctr_y   = boxes[:, :, 1] + 0.5 * heights
+        ctr_x = boxes[:, :, 0] + 0.5 * widths
+        ctr_y = boxes[:, :, 1] + 0.5 * heights
 
         dx = deltas[:, :, 0] * self.std[0] + self.mean[0]
         dy = deltas[:, :, 1] * self.std[1] + self.mean[1]
@@ -30,17 +35,19 @@ class BBoxTransform(nn.Module):
 
         pred_ctr_x = ctr_x + dx * widths
         pred_ctr_y = ctr_y + dy * heights
-        pred_w     = torch.exp(dw) * widths
-        pred_h     = torch.exp(dh) * heights
+        pred_w = torch.exp(dw) * widths
+        pred_h = torch.exp(dh) * heights
 
         pred_boxes_x1 = pred_ctr_x - 0.5 * pred_w
         pred_boxes_y1 = pred_ctr_y - 0.5 * pred_h
         pred_boxes_x2 = pred_ctr_x + 0.5 * pred_w
         pred_boxes_y2 = pred_ctr_y + 0.5 * pred_h
 
-        pred_boxes = torch.stack([pred_boxes_x1, pred_boxes_y1, pred_boxes_x2, pred_boxes_y2], dim=2)
+        pred_boxes = torch.stack(
+            [pred_boxes_x1, pred_boxes_y1, pred_boxes_x2, pred_boxes_y2], dim=2)
 
         return pred_boxes
+
 
 class ClipBoxes(nn.Module):
 
@@ -56,68 +63,96 @@ class ClipBoxes(nn.Module):
 
         boxes[:, :, 2] = torch.clamp(boxes[:, :, 2], max=width)
         boxes[:, :, 3] = torch.clamp(boxes[:, :, 3], max=height)
-      
+
         return boxes
+
 
 class RegressionModel(nn.Module):
     def __init__(self, num_features_in, num_anchors=9, feature_size=256):
         super(RegressionModel, self).__init__()
-        
+
         self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
         self.act1 = nn.ReLU()
+
         self.conv2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act2 = nn.ReLU()
+
         self.conv3 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act3 = nn.ReLU()
+
         self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act4 = nn.ReLU()
-        self.output = nn.Conv2d(feature_size, num_anchors*4, kernel_size=3, padding=1)
+
+        self.output = nn.Conv2d(feature_size, num_anchors * 4, kernel_size=3, padding=1)
+
     def forward(self, x):
         out = self.conv1(x)
         out = self.act1(out)
+
         out = self.conv2(out)
         out = self.act2(out)
+
         out = self.conv3(out)
         out = self.act3(out)
+
         out = self.conv4(out)
         out = self.act4(out)
+
         out = self.output(out)
+
         # out is B x C x W x H, with C = 4*num_anchors
         out = out.permute(0, 2, 3, 1)
+
         return out.contiguous().view(out.shape[0], -1, 4)
+
 
 class ClassificationModel(nn.Module):
     def __init__(self, num_features_in, num_anchors=9, num_classes=80, prior=0.01, feature_size=256):
         super(ClassificationModel, self).__init__()
+
         self.num_classes = num_classes
         self.num_anchors = num_anchors
-        
+
         self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
         self.act1 = nn.ReLU()
+
         self.conv2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act2 = nn.ReLU()
+
         self.conv3 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act3 = nn.ReLU()
+
         self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act4 = nn.ReLU()
-        self.output = nn.Conv2d(feature_size, num_anchors*num_classes, kernel_size=3, padding=1)
+
+        self.output = nn.Conv2d(feature_size, num_anchors * num_classes, kernel_size=3, padding=1)
         self.output_act = nn.Sigmoid()
+
     def forward(self, x):
         out = self.conv1(x)
         out = self.act1(out)
+
         out = self.conv2(out)
         out = self.act2(out)
+
         out = self.conv3(out)
         out = self.act3(out)
+
         out = self.conv4(out)
         out = self.act4(out)
+
         out = self.output(out)
         out = self.output_act(out)
+
         # out is B x C x W x H, with C = n_classes + n_anchors
         out1 = out.permute(0, 2, 3, 1)
+
         batch_size, width, height, channels = out1.shape
+
         out2 = out1.view(batch_size, width, height, self.num_anchors, self.num_classes)
+
         return out2.contiguous().view(x.shape[0], -1, self.num_classes)
+
 
 class Anchors(nn.Module):
     def __init__(self, pyramid_levels=None, strides=None, sizes=None, ratios=None, scales=None):
@@ -151,6 +186,7 @@ class Anchors(nn.Module):
         all_anchors = np.expand_dims(all_anchors, axis=0)
 
         return torch.from_numpy(all_anchors.astype(np.float32)).to(image.device)
+
 
 def generate_anchors(base_size=16, ratios=None, scales=None):
     """
@@ -195,6 +231,7 @@ def compute_shape(image_shape, pyramid_levels):
     image_shapes = [(image_shape + 2 ** x - 1) // (2 ** x) for x in pyramid_levels]
     return image_shapes
 
+
 def anchors_for_shape(
     image_shape,
     pyramid_levels=None,
@@ -238,3 +275,352 @@ def shift(shape, stride, anchors):
     all_anchors = all_anchors.reshape((K * A, 4))
 
     return all_anchors
+
+
+def conv_ws_2d(input,
+               weight,
+               bias=None,
+               stride=1,
+               padding=0,
+               dilation=1,
+               groups=1,
+               eps=1e-5):
+    c_in = weight.size(0)
+    weight_flat = weight.view(c_in, -1)
+    mean = weight_flat.mean(dim=1, keepdim=True).view(c_in, 1, 1, 1)
+    std = weight_flat.std(dim=1, keepdim=True).view(c_in, 1, 1, 1)
+    weight = (weight - mean) / (std + eps)
+    return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
+
+
+class ConvWS2d(nn.Conv2d):
+
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride=1,
+                 padding=0,
+                 dilation=1,
+                 groups=1,
+                 bias=True,
+                 eps=1e-5):
+        super(ConvWS2d, self).__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias)
+        self.eps = eps
+
+    def forward(self, x):
+        return conv_ws_2d(x, self.weight, self.bias, self.stride, self.padding,
+                          self.dilation, self.groups, self.eps)
+
+conv_cfg = {
+    'Conv': nn.Conv2d,
+    'ConvWS': ConvWS2d,
+    # TODO: octave conv
+}
+
+
+def build_conv_layer(cfg, *args, **kwargs):
+    """ Build convolution layer
+    Args:
+        cfg (None or dict): cfg should contain:
+            type (str): identify conv layer type.
+            layer args: args needed to instantiate a conv layer.
+    Returns:
+        layer (nn.Module): created conv layer
+    """
+    if cfg is None:
+        cfg_ = dict(type='Conv')
+    else:
+        assert isinstance(cfg, dict) and 'type' in cfg
+        cfg_ = cfg.copy()
+
+    layer_type = cfg_.pop('type')
+    if layer_type not in conv_cfg:
+        raise KeyError('Unrecognized norm type {}'.format(layer_type))
+    else:
+        conv_layer = conv_cfg[layer_type]
+
+    layer = conv_layer(*args, **kwargs, **cfg_)
+
+    return layer
+
+
+
+norm_cfg = {
+    # format: layer_type: (abbreviation, module)
+    'BN': ('bn', nn.BatchNorm2d),
+    'SyncBN': ('bn', nn.SyncBatchNorm),
+    'GN': ('gn', nn.GroupNorm),
+    # and potentially 'SN'
+}
+
+
+def build_norm_layer(cfg, num_features, postfix=''):
+    """ Build normalization layer
+    Args:
+        cfg (dict): cfg should contain:
+            type (str): identify norm layer type.
+            layer args: args needed to instantiate a norm layer.
+            requires_grad (bool): [optional] whether stop gradient updates
+        num_features (int): number of channels from input.
+        postfix (int, str): appended into norm abbreviation to
+            create named layer.
+    Returns:
+        name (str): abbreviation + postfix
+        layer (nn.Module): created norm layer
+    """
+    assert isinstance(cfg, dict) and 'type' in cfg
+    cfg_ = cfg.copy()
+
+    layer_type = cfg_.pop('type')
+    if layer_type not in norm_cfg:
+        raise KeyError('Unrecognized norm type {}'.format(layer_type))
+    else:
+        abbr, norm_layer = norm_cfg[layer_type]
+        if norm_layer is None:
+            raise NotImplementedError
+
+    assert isinstance(postfix, (int, str))
+    name = abbr + str(postfix)
+
+    requires_grad = cfg_.pop('requires_grad', True)
+    cfg_.setdefault('eps', 1e-5)
+    if layer_type != 'GN':
+        layer = norm_layer(num_features, **cfg_)
+        if layer_type == 'SyncBN':
+            layer._specify_ddp_gpu_num(1)
+    else:
+        assert 'num_groups' in cfg_
+        layer = norm_layer(num_channels=num_features, **cfg_)
+
+    for param in layer.parameters():
+        param.requires_grad = requires_grad
+
+    return name, layer
+
+activation_cfg = {
+    # layer_abbreviation: module
+    'ReLU': nn.ReLU,
+    'LeakyReLU': nn.LeakyReLU,
+    'PReLU': nn.PReLU,
+    'RReLU': nn.RReLU,
+    'ReLU6': nn.ReLU6,
+    'SELU': nn.SELU,
+    'CELU': nn.CELU
+}
+
+
+def build_activation_layer(cfg):
+    """ Build activation layer
+    Args:
+        cfg (dict): cfg should contain:
+            type (str): Identify activation layer type.
+            layer args: args needed to instantiate a activation layer.
+    Returns:
+        layer (nn.Module): Created activation layer
+    """
+    assert isinstance(cfg, dict) and 'type' in cfg
+    cfg_ = cfg.copy()
+
+    layer_type = cfg_.pop('type')
+    if layer_type not in activation_cfg:
+        raise KeyError('Unrecognized activation type {}'.format(layer_type))
+    else:
+        activation = activation_cfg[layer_type]
+        if activation is None:
+            raise NotImplementedError
+
+    layer = activation(**cfg_)
+    return layer
+
+class ConvModule(nn.Module):
+    """A conv block that contains conv/norm/activation layers.
+    Args:
+        in_channels (int): Same as nn.Conv2d.
+        out_channels (int): Same as nn.Conv2d.
+        kernel_size (int or tuple[int]): Same as nn.Conv2d.
+        stride (int or tuple[int]): Same as nn.Conv2d.
+        padding (int or tuple[int]): Same as nn.Conv2d.
+        dilation (int or tuple[int]): Same as nn.Conv2d.
+        groups (int): Same as nn.Conv2d.
+        bias (bool or str): If specified as `auto`, it will be decided by the
+            norm_cfg. Bias will be set as True if norm_cfg is None, otherwise
+            False.
+        conv_cfg (dict): Config dict for convolution layer.
+        norm_cfg (dict): Config dict for normalization layer.
+        act_cfg (dict): Config dict for activation layer, "relu" by default.
+        inplace (bool): Whether to use inplace mode for activation.
+        order (tuple[str]): The order of conv/norm/activation layers. It is a
+            sequence of "conv", "norm" and "act". Examples are
+            ("conv", "norm", "act") and ("act", "conv", "norm").
+    """
+
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride=1,
+                 padding=0,
+                 dilation=1,
+                 groups=1,
+                 bias='auto',
+                 conv_cfg=None,
+                 norm_cfg=None,
+                 act_cfg=dict(type='ReLU'),
+                 inplace=True,
+                 order=('conv', 'norm', 'act')):
+        super(ConvModule, self).__init__()
+        assert conv_cfg is None or isinstance(conv_cfg, dict)
+        assert norm_cfg is None or isinstance(norm_cfg, dict)
+        assert act_cfg is None or isinstance(act_cfg, dict)
+        self.conv_cfg = conv_cfg
+        self.norm_cfg = norm_cfg
+        self.act_cfg = act_cfg
+        self.inplace = inplace
+        self.order = order
+        assert isinstance(self.order, tuple) and len(self.order) == 3
+        assert set(order) == set(['conv', 'norm', 'act'])
+
+        self.with_norm = norm_cfg is not None
+        self.with_activation = act_cfg is not None
+        # if the conv layer is before a norm layer, bias is unnecessary.
+        if bias == 'auto':
+            bias = False if self.with_norm else True
+        self.with_bias = bias
+
+        if self.with_norm and self.with_bias:
+            warnings.warn('ConvModule has norm and bias at the same time')
+
+        # build convolution layer
+        self.conv = build_conv_layer(
+            conv_cfg,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias)
+        # export the attributes of self.conv to a higher level for convenience
+        self.in_channels = self.conv.in_channels
+        self.out_channels = self.conv.out_channels
+        self.kernel_size = self.conv.kernel_size
+        self.stride = self.conv.stride
+        self.padding = self.conv.padding
+        self.dilation = self.conv.dilation
+        self.transposed = self.conv.transposed
+        self.output_padding = self.conv.output_padding
+        self.groups = self.conv.groups
+
+        # build normalization layers
+        if self.with_norm:
+            # norm layer is after conv layer
+            if order.index('norm') > order.index('conv'):
+                norm_channels = out_channels
+            else:
+                norm_channels = in_channels
+            self.norm_name, norm = build_norm_layer(norm_cfg, norm_channels)
+            self.add_module(self.norm_name, norm)
+
+        # build activation layer
+        if self.with_activation:
+            act_cfg_ = act_cfg.copy()
+            act_cfg_.setdefault('inplace', inplace)
+            self.activate = build_activation_layer(act_cfg_)
+
+        # Use msra init by default
+        self.init_weights()
+
+    @property
+    def norm(self):
+        return getattr(self, self.norm_name)
+
+    def init_weights(self):
+        if self.with_activation and self.act_cfg['type'] == 'LeakyReLU':
+            nonlinearity = 'leaky_relu'
+        else:
+            nonlinearity = 'relu'
+        kaiming_init(self.conv, nonlinearity=nonlinearity)
+        if self.with_norm:
+            constant_init(self.norm, 1, bias=0)
+
+    def forward(self, x, activate=True, norm=True):
+        for layer in self.order:
+            if layer == 'conv':
+                x = self.conv(x)
+            elif layer == 'norm' and norm and self.with_norm:
+                x = self.norm(x)
+            elif layer == 'act' and activate and self.with_activation:
+                x = self.activate(x)
+        return x
+
+def constant_init(module, val, bias=0):
+    if hasattr(module, 'weight') and module.weight is not None:
+        nn.init.constant_(module.weight, val)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+
+def xavier_init(module, gain=1, bias=0, distribution='normal'):
+    assert distribution in ['uniform', 'normal']
+    if distribution == 'uniform':
+        nn.init.xavier_uniform_(module.weight, gain=gain)
+    else:
+        nn.init.xavier_normal_(module.weight, gain=gain)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+
+def normal_init(module, mean=0, std=1, bias=0):
+    nn.init.normal_(module.weight, mean, std)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+
+def uniform_init(module, a=0, b=1, bias=0):
+    nn.init.uniform_(module.weight, a, b)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+
+def kaiming_init(module,
+                 a=0,
+                 mode='fan_out',
+                 nonlinearity='relu',
+                 bias=0,
+                 distribution='normal'):
+    assert distribution in ['uniform', 'normal']
+    if distribution == 'uniform':
+        nn.init.kaiming_uniform_(
+            module.weight, a=a, mode=mode, nonlinearity=nonlinearity)
+    else:
+        nn.init.kaiming_normal_(
+            module.weight, a=a, mode=mode, nonlinearity=nonlinearity)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+
+def caffe2_xavier_init(module, bias=0):
+    # `XavierFill` in Caffe2 corresponds to `kaiming_uniform_` in PyTorch
+    # Acknowledgment to FAIR's internal code
+    kaiming_init(
+        module,
+        a=1,
+        mode='fan_in',
+        nonlinearity='leaky_relu',
+        distribution='uniform')
+
+
+def bias_init_with_prob(prior_prob):
+    """ initialize conv/fc bias value according to giving probablity"""
+    bias_init = float(-np.log((1 - prior_prob) / prior_prob))
+    return bias_init

@@ -41,6 +41,7 @@ class MBConvBlock(nn.Module):
         if self._block_args.expand_ratio != 1:
             self._expand_conv = Conv2d(in_channels=inp, out_channels=oup, kernel_size=1, bias=False)
             self._bn0 = nn.BatchNorm2d(num_features=oup, momentum=self._bn_mom, eps=self._bn_eps)
+
         # Depthwise convolution phase
         k = self._block_args.kernel_size
         s = self._block_args.stride
@@ -72,7 +73,6 @@ class MBConvBlock(nn.Module):
         x = inputs
         if self._block_args.expand_ratio != 1:
             x = self._swish(self._bn0(self._expand_conv(inputs)))
-        
         x = self._swish(self._bn1(self._depthwise_conv(x)))
 
         # Squeeze and Excitation
@@ -125,26 +125,27 @@ class EfficientNet(nn.Module):
         out_channels = round_filters(32, self._global_params)  # number of output channels
         self._conv_stem = Conv2d(in_channels, out_channels, kernel_size=3, stride=2, bias=False)
         self._bn0 = nn.BatchNorm2d(num_features=out_channels, momentum=bn_mom, eps=bn_eps)
-        
+
         # Build blocks
         self._blocks = nn.ModuleList([])
-        for i in range(len(self._blocks_args)):
+        for block_args in self._blocks_args:
+
             # Update block input and output filters based on depth multiplier.
-            self._blocks_args[i] = self._blocks_args[i]._replace(
-                input_filters=round_filters(self._blocks_args[i].input_filters, self._global_params),
-                output_filters=round_filters(self._blocks_args[i].output_filters, self._global_params),
-                num_repeat=round_repeats(self._blocks_args[i].num_repeat, self._global_params)
+            block_args = block_args._replace(
+                input_filters=round_filters(block_args.input_filters, self._global_params),
+                output_filters=round_filters(block_args.output_filters, self._global_params),
+                num_repeat=round_repeats(block_args.num_repeat, self._global_params)
             )
 
             # The first block needs to take care of stride and filter size increase.
-            self._blocks.append(MBConvBlock(self._blocks_args[i], self._global_params))
-            if self._blocks_args[i].num_repeat > 1:
-                self._blocks_args[i] = self._blocks_args[i]._replace(input_filters=self._blocks_args[i].output_filters, stride=1)
-            for _ in range(self._blocks_args[i].num_repeat - 1):
-                self._blocks.append(MBConvBlock(self._blocks_args[i], self._global_params))
+            self._blocks.append(MBConvBlock(block_args, self._global_params))
+            if block_args.num_repeat > 1:
+                block_args = block_args._replace(input_filters=block_args.output_filters, stride=1)
+            for _ in range(block_args.num_repeat - 1):
+                self._blocks.append(MBConvBlock(block_args, self._global_params))
 
-        # Head'efficientdet-d0': 'efficientnet-b0',
-        in_channels = self._blocks_args[len(self._blocks_args)-1].output_filters  # output of final block
+        # Head
+        in_channels = block_args.output_filters  # output of final block
         out_channels = round_filters(1280, self._global_params)
         self._conv_head = Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
         self._bn1 = nn.BatchNorm2d(num_features=out_channels, momentum=bn_mom, eps=bn_eps)
@@ -161,34 +162,28 @@ class EfficientNet(nn.Module):
         for block in self._blocks:
             block.set_swish(memory_efficient)
 
-
     def extract_features(self, inputs):
         """ Returns output of the final convolution layer """
         # Stem
         x = self._swish(self._bn0(self._conv_stem(inputs)))
 
         P = []
-        index = 0 
-        num_repeat = 0
-         # Blocks
+        # Blocks
         for idx, block in enumerate(self._blocks):
             drop_connect_rate = self._global_params.drop_connect_rate
             if drop_connect_rate:
                 drop_connect_rate *= float(idx) / len(self._blocks)
             x = block(x, drop_connect_rate=drop_connect_rate)
-            num_repeat = num_repeat + 1
-            if(num_repeat == self._blocks_args[index].num_repeat):
-                num_repeat = 0
-                index = index + 1
+            if(block._depthwise_conv.stride == [2, 2]):
                 P.append(x)
-        return P
+        return P[1:]
 
     def forward(self, inputs):
         """ Calls extract_features to extract features, applies final linear layer, and returns logits. """
         # Convolution layers
         P = self.extract_features(inputs)
         return P
-    
+
     @classmethod
     def from_name(cls, model_name, override_params=None):
         cls._check_model_name_is_valid(model_name)
@@ -196,9 +191,9 @@ class EfficientNet(nn.Module):
         return cls(blocks_args, global_params)
 
     @classmethod
-    def from_pretrained(cls, model_name, num_classes=1000, in_channels = 3):
+    def from_pretrained(cls, model_name, advprop=False, num_classes=1000, in_channels=3):
         model = cls.from_name(model_name, override_params={'num_classes': num_classes})
-        load_pretrained_weights(model, model_name, load_fc=(num_classes == 1000))
+        load_pretrained_weights(model, model_name, load_fc=(num_classes == 1000), advprop=advprop)
         if in_channels != 3:
             Conv2d = get_same_padding_conv2d(image_size = model._global_params.image_size)
             out_channels = round_filters(32, model._global_params)
@@ -206,44 +201,31 @@ class EfficientNet(nn.Module):
         return model
     
     @classmethod
-    def from_pretrained(cls, model_name, num_classes=1000):
-        model = cls.from_name(model_name, override_params={'num_classes': num_classes})
-        load_pretrained_weights(model, model_name, load_fc=(num_classes == 1000))
-
-        return model
-
-    @classmethod
     def get_image_size(cls, model_name):
         cls._check_model_name_is_valid(model_name)
         _, _, res, _ = efficientnet_params(model_name)
         return res
 
     @classmethod
-    def _check_model_name_is_valid(cls, model_name, also_need_pretrained_weights=False):
-        """ Validates model name. None that pretrained weights are only available for
-        the first four models (efficientnet-b{i} for i in 0,1,2,3) at the moment. """
-        num_models = 4 if also_need_pretrained_weights else 8
-        valid_models = ['efficientnet-b'+str(i) for i in range(num_models)]
+    def _check_model_name_is_valid(cls, model_name):
+        """ Validates model name. """ 
+        valid_models = ['efficientnet-b'+str(i) for i in range(9)]
         if model_name not in valid_models:
             raise ValueError('model_name should be one of: ' + ', '.join(valid_models))
-    
+
     def get_list_features(self):
         list_feature = []
-        for idx in range(len(self._blocks_args)):
-            list_feature.append(self._blocks_args[idx].output_filters)
-        
-        return list_feature
+        for idx, block in enumerate(self._blocks):
+            drop_connect_rate = self._global_params.drop_connect_rate
 
+            if(block._depthwise_conv.stride == [2, 2]):
+                list_feature.append(block._bn2.num_features)
+        return list_feature[1:]
 
-
-
-
-if __name__=='__main__':
+if __name__ == '__main__':
     model = EfficientNet.from_pretrained('efficientnet-b0')
     inputs = torch.randn(4, 3, 640, 640)
     P = model(inputs)
     for idx, p in enumerate(P):
         print('P{}: {}'.format(idx, p.size()))
-    # print('model: ', model) 
-
-    
+    # print('model: ', model)

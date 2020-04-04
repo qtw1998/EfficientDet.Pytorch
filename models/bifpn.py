@@ -1,197 +1,199 @@
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-from .conv_module import ConvModule
 import torch
-class BIFPN(nn.Module):
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 num_outs,
-                 start_level=0,
-                 end_level=-1,
-                 stack=1,
-                 add_extra_convs=False,
-                 extra_convs_on_inputs=True,
-                 relu_before_extra_convs=False,
-                 no_norm_on_lateral=False,
-                 conv_cfg=None,
-                 norm_cfg=None,
-                 activation=None):
-        super(BIFPN, self).__init__()
-        assert isinstance(in_channels, list)
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.num_ins = len(in_channels)
-        self.num_outs = num_outs
-        self.activation = activation
-        self.relu_before_extra_convs = relu_before_extra_convs
-        self.no_norm_on_lateral = no_norm_on_lateral
-        self.stack = stack
+import torch.nn as nn
 
-        if end_level == -1:
-            self.backbone_end_level = self.num_ins
-            assert num_outs >= self.num_ins - start_level
-        else:
-            # if end_level < inputs, no extra level is allowed
-            self.backbone_end_level = end_level
-            assert end_level <= len(in_channels)
-            assert num_outs == end_level - start_level
-        self.start_level = start_level
-        self.end_level = end_level
-        self.add_extra_convs = add_extra_convs
-        self.extra_convs_on_inputs = extra_convs_on_inputs
+class ConvBlock(nn.Module):
+    def __init__(self, num_channels):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1, padding=1, groups=num_channels),
+            nn.Conv2d(num_channels, num_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(num_features=num_channels, momentum=0.9997, eps=4e-5), nn.ReLU())
 
-        self.lateral_convs = nn.ModuleList()
-        self.fpn_convs = nn.ModuleList()
-        self.stack_bifpn_convs = nn.ModuleList()
+    def forward(self, input):
+        return self.conv(input)
 
-        for i in range(self.start_level, self.backbone_end_level):
-            l_conv = ConvModule(
-                in_channels[i],
-                out_channels,
-                1,
-                conv_cfg=conv_cfg,
-                norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
-                activation=self.activation,
-                inplace=False)
-            self.lateral_convs.append(l_conv)
 
-        for ii in range(stack):
-            self.stack_bifpn_convs.append(BiFPNModule(channels=out_channels,
-                                                      levels=self.backbone_end_level-self.start_level,
-                                                      conv_cfg=conv_cfg,
-                                                      norm_cfg=norm_cfg,
-                                                      activation=activation))
-        # add extra conv layers (e.g., RetinaNet)
-        extra_levels = num_outs - self.backbone_end_level + self.start_level
-        if add_extra_convs and extra_levels >= 1:
-            for i in range(extra_levels):
-                if i == 0 and self.extra_convs_on_inputs:
-                    in_channels = self.in_channels[self.backbone_end_level - 1]
-                else:
-                    in_channels = out_channels
-                extra_fpn_conv = ConvModule(
-                    in_channels,
-                    out_channels,
-                    3,
-                    stride=2,
-                    padding=1,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    activation=self.activation,
-                    inplace=False)
-                self.fpn_convs.append(extra_fpn_conv)
+class BiFPN(nn.Module):
+    def __init__(self, num_channels, epsilon=1e-4):
+        super(BiFPN, self).__init__()
+        self.epsilon = epsilon
+        # Conv layers
+        self.conv6_up = ConvBlock(num_channels)
+        self.conv5_up = ConvBlock(num_channels)
+        self.conv4_up = ConvBlock(num_channels)
+        self.conv3_up = ConvBlock(num_channels)
+        self.conv4_down = ConvBlock(num_channels)
+        self.conv5_down = ConvBlock(num_channels)
+        self.conv6_down = ConvBlock(num_channels)
+        self.conv7_down = ConvBlock(num_channels)
 
-    # default init_weights for conv(msra) and norm in ConvModule
-    def init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                xavier_init(m, distribution='uniform')
+        # Feature scaling layers
+        self.p6_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.p5_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.p4_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.p3_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+
+        self.p4_downsample = nn.MaxPool2d(kernel_size=2)
+        self.p5_downsample = nn.MaxPool2d(kernel_size=2)
+        self.p6_downsample = nn.MaxPool2d(kernel_size=2)
+        self.p7_downsample = nn.MaxPool2d(kernel_size=2)
+
+        # Weight
+        self.p6_w1 = nn.Parameter(torch.ones(2))
+        self.p6_w1_relu = nn.ReLU()
+        self.p5_w1 = nn.Parameter(torch.ones(2))
+        self.p5_w1_relu = nn.ReLU()
+        self.p4_w1 = nn.Parameter(torch.ones(2))
+        self.p4_w1_relu = nn.ReLU()
+        self.p3_w1 = nn.Parameter(torch.ones(2))
+        self.p3_w1_relu = nn.ReLU()
+
+        self.p4_w2 = nn.Parameter(torch.ones(3))
+        self.p4_w2_relu = nn.ReLU()
+        self.p5_w2 = nn.Parameter(torch.ones(3))
+        self.p5_w2_relu = nn.ReLU()
+        self.p6_w2 = nn.Parameter(torch.ones(3))
+        self.p6_w2_relu = nn.ReLU()
+        self.p7_w2 = nn.Parameter(torch.ones(2))
+        self.p7_w2_relu = nn.ReLU()
 
     def forward(self, inputs):
-        assert len(inputs) == len(self.in_channels)
+        """
+            P7_0 -------------------------- P7_2 -------->
+            P6_0 ---------- P6_1 ---------- P6_2 -------->
+            P5_0 ---------- P5_1 ---------- P5_2 -------->
+            P4_0 ---------- P4_1 ---------- P4_2 -------->
+            P3_0 -------------------------- P3_2 -------->
+        """
 
-        # build laterals
-        laterals = [
-            lateral_conv(inputs[i + self.start_level])
-            for i, lateral_conv in enumerate(self.lateral_convs)
-        ]
-        
-        # part 1: build top-down and down-top path with stack
-        used_backbone_levels = len(laterals)
-        for bifpn_module in self.stack_bifpn_convs:
-            laterals = bifpn_module(laterals)
-        outs = laterals
-        # part 2: add extra levels
-        if self.num_outs > len(outs):
-            # use max pool to get more levels on top of outputs
-            # (e.g., Faster R-CNN, Mask R-CNN)
-            if not self.add_extra_convs:
-                for i in range(self.num_outs - used_backbone_levels):
-                    outs.append(F.max_pool2d(outs[-1], 1, stride=2))
-            # add conv layers on top of original feature maps (RetinaNet)
-            else:
-                if self.extra_convs_on_inputs:
-                    orig = inputs[self.backbone_end_level - 1]
-                    outs.append(self.fpn_convs[0](orig))
-                else:
-                    outs.append(self.fpn_convs[0](outs[-1]))
-                for i in range(1, self.num_outs - used_backbone_levels):
-                    if self.relu_before_extra_convs:
-                        outs.append(self.fpn_convs[i](F.relu(outs[-1])))
-                    else:
-                        outs.append(self.fpn_convs[i](outs[-1]))
-        return tuple(outs)
+        # P3_0, P4_0, P5_0, P6_0 and P7_0
+        p3_in, p4_in, p5_in, p6_in, p7_in = inputs
+        # P7_0 to P7_2
+        # Weights for P6_0 and P7_0 to P6_1
+        p6_w1 = self.p6_w1_relu(self.p6_w1)
+        weight = p6_w1 / (torch.sum(p6_w1, dim=0) + self.epsilon)
+        # Connections for P6_0 and P7_0 to P6_1 respectively
+        p6_up = self.conv6_up(weight[0] * p6_in + weight[1] * self.p6_upsample(p7_in))
+        # Weights for P5_0 and P6_0 to P5_1
+        p5_w1 = self.p5_w1_relu(self.p5_w1)
+        weight = p5_w1 / (torch.sum(p5_w1, dim=0) + self.epsilon)
+        # Connections for P5_0 and P6_0 to P5_1 respectively
+        p5_up = self.conv5_up(weight[0] * p5_in + weight[1] * self.p5_upsample(p6_up))
+        # Weights for P4_0 and P5_0 to P4_1
+        p4_w1 = self.p4_w1_relu(self.p4_w1)
+        weight = p4_w1 / (torch.sum(p4_w1, dim=0) + self.epsilon)
+        # Connections for P4_0 and P5_0 to P4_1 respectively
+        p4_up = self.conv4_up(weight[0] * p4_in + weight[1] * self.p4_upsample(p5_up))
+
+        # Weights for P3_0 and P4_1 to P3_2
+        p3_w1 = self.p3_w1_relu(self.p3_w1)
+        weight = p3_w1 / (torch.sum(p3_w1, dim=0) + self.epsilon)
+        # Connections for P3_0 and P4_1 to P3_2 respectively
+        p3_out = self.conv3_up(weight[0] * p3_in + weight[1] * self.p3_upsample(p4_up))
+
+        # Weights for P4_0, P4_1 and P3_2 to P4_2
+        p4_w2 = self.p4_w2_relu(self.p4_w2)
+        weight = p4_w2 / (torch.sum(p4_w2, dim=0) + self.epsilon)
+        # Connections for P4_0, P4_1 and P3_2 to P4_2 respectively
+        p4_out = self.conv4_down(
+            weight[0] * p4_in + weight[1] * p4_up + weight[2] * self.p4_downsample(p3_out))
+        # Weights for P5_0, P5_1 and P4_2 to P5_2
+        p5_w2 = self.p5_w2_relu(self.p5_w2)
+        weight = p5_w2 / (torch.sum(p5_w2, dim=0) + self.epsilon)
+        # Connections for P5_0, P5_1 and P4_2 to P5_2 respectively
+        p5_out = self.conv5_down(
+            weight[0] * p5_in + weight[1] * p5_up + weight[2] * self.p5_downsample(p4_out))
+        # Weights for P6_0, P6_1 and P5_2 to P6_2
+        p6_w2 = self.p6_w2_relu(self.p6_w2)
+        weight = p6_w2 / (torch.sum(p6_w2, dim=0) + self.epsilon)
+        # Connections for P6_0, P6_1 and P5_2 to P6_2 respectively
+        p6_out = self.conv6_down(
+            weight[0] * p6_in + weight[1] * p6_up + weight[2] * self.p6_downsample(p5_out))
+        # Weights for P7_0 and P6_2 to P7_2
+        p7_w2 = self.p7_w2_relu(self.p7_w2)
+        weight = p7_w2 / (torch.sum(p7_w2, dim=0) + self.epsilon)
+        # Connections for P7_0 and P6_2 to P7_2
+        p7_out = self.conv7_down(weight[0] * p7_in + weight[1] * self.p7_downsample(p6_out))
+
+        return p3_out, p4_out, p5_out, p6_out, p7_out
 
 
-class BiFPNModule(nn.Module):
-    def __init__(self,
-                 channels,
-                 levels,
-                 init=0.5,
-                 conv_cfg=None,
-                 norm_cfg=None,
-                 activation=None,
-                 eps = 0.0001):
-        super(BiFPNModule, self).__init__()
-        self.activation = activation
-        self.eps = eps 
-        self.levels = levels
-        self.bifpn_convs = nn.ModuleList()
-        # weighted
-        self.w1 = nn.Parameter(torch.Tensor(2, levels).fill_(init))
-        self.relu1 = nn.ReLU()
-        self.w2 = nn.Parameter(torch.Tensor(3, levels - 2).fill_(init))
-        self.relu2 = nn.ReLU()
-        for jj in range(2):
-            for i in range(self.levels-1):  # 1,2,3
-                fpn_conv = nn.Sequential(
-                    ConvModule(
-                        channels,
-                        channels,
-                        3,
-                        padding=1,
-                        conv_cfg=conv_cfg,
-                        norm_cfg=norm_cfg,
-                        activation=self.activation,
-                        inplace=False)
-                        )
-                self.bifpn_convs.append(fpn_conv)
-
-    # default init_weights for conv(msra) and norm in ConvModule
-    def init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                xavier_init(m, distribution='uniform')
-
-    def forward(self, inputs):
-        assert len(inputs) == self.levels
-        # build top-down and down-top path with stack
-        levels = self.levels
-        # w relu
-        w1 = self.relu1(self.w1)
-        w1 /= torch.sum(w1, dim=0) + self.eps  # normalize
-        w2 = self.relu2(self.w2)
-        w2 /= torch.sum(w2, dim=0) + self.eps # normalize 
-        # build top-down
-        idx_bifpn = 0
-        pathtd = inputs
-        inputs_clone = []
-        for in_tensor in inputs:
-            inputs_clone.append(in_tensor.clone())
-        
-        for i in range(levels - 1, 0, -1):
-            pathtd[i - 1] = (w1[0, i-1]*pathtd[i - 1] + w1[1, i-1]*F.interpolate(pathtd[i], scale_factor=2, mode='nearest'))/(w1[0, i-1] + w1[1, i-1] + self.eps)
-            pathtd[i - 1] = self.bifpn_convs[idx_bifpn](pathtd[i - 1])
-            idx_bifpn = idx_bifpn + 1
-        # build down-top
-        for i in range(0, levels - 2, 1):
-            pathtd[i + 1] = (w2[0, i] * pathtd[i + 1] + w2[1, i] * F.max_pool2d(pathtd[i], kernel_size=2) + w2[2, i] * inputs_clone[i + 1])/(w2[0, i] + w2[1, i] + w2[2, i] + self.eps)
-            pathtd[i + 1] = self.bifpn_convs[idx_bifpn](pathtd[i + 1])
-            idx_bifpn = idx_bifpn + 1
-
-        pathtd[levels - 1] = (w1[0, levels-1] * pathtd[levels - 1] + w1[1, levels-1] * F.max_pool2d(pathtd[levels - 2], kernel_size=2))/(w1[0, levels-1] + w1[1, levels-1] + self.eps)
-        pathtd[levels - 1] = self.bifpn_convs[idx_bifpn](pathtd[levels - 1])
-        return pathtd
+#class ConvModule(nn.Module):
+#    def __init__(self, num_channels):
+#        super(ConvModule, self).__init__()
+#        self.module = nn.Sequential(
+#                nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=3, stride=1, padding=1, groups=num_channels),
+#                nn.Conv2d(in_channels=num_channels, out_channels=num_channels, kernel_size=1, stride=1, padding=0),
+#                nn.BatchNorm2d(num_features=num_channels, momentum=0.9997, eps=4e-5),
+#                nn.ReLU()
+#                )
+#    def forward(self, inputs):
+#        return self.module(inputs)
+#class BiFPN(nn.Module):
+#    def __init__(self, num_channels, eps=0.0001):
+#        super(BiFPN, self).__init__()
+#        self.eps = eps 
+#
+#        self.conv6_up = ConvModule(num_channels)
+#        self.p6_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+#        self.conv5_up = ConvModule(num_channels)
+#        self.p5_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+#        self.conv5_up = ConvModule(num_channels)
+#        self.p5_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+#        self.conv4_up = ConvModule(num_channels)
+#        self.p4_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+#        self.conv3_up = ConvModule(num_channels)
+#        self.p3_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+#        self.conv4_down = ConvModule(num_channels)
+#        self.conv5_down = ConvModule(num_channels)
+#        self.conv6_down = ConvModule(num_channels)
+#        self.conv7_down = ConvModule(num_channels)
+#
+#        self.p4_downsample = nn.MaxPool2d(kernel_size=2)
+#        self.p5_downsample = nn.MaxPool2d(kernel_size=2)
+#        self.p6_downsample = nn.MaxPool2d(kernel_size=2)
+#        self.p7_downsample = nn.MaxPool2d(kernel_size=2)
+#
+#
+#        
+#        # weights
+#        self.w1 = nn.Parameter(torch.ones(2, 5))
+#        self.relu1 = nn.ReLU()
+#        self.w2 = nn.Parameter(torch.ones(3, 3))
+#        self.relu2 = nn.ReLU()
+#
+#    def forward(self, inputs):
+#        p3_in, p4_in, p5_in, p6_in, p7_in = inputs 
+#        w1 = self.relu1(self.w1)
+#        w1 /= torch.sum(w1, dim=0) + self.eps 
+#
+#        w2 = self.relu2(self.w2)
+#        w2 /= torch.sum(w2, dim=0) + self.eps
+#        P3_in, P4_in, P5_in, P6_in, P7_in = inputs 
+#        p6_up = self.conv6_up(w1[0, 1]*p6_in + w1[1, 1]*self.p6_upsample(p7_in))
+#        p5_up = self.conv5_up(w1[0, 2]*p5_in + w1[1, 2]*self.p5_upsample(p6_up))
+#        p4_up = self.conv5_up(w1[0, 3]*p4_in + w1[1, 3]*self.p4_upsample(p5_up))
+#        p3_out = self.conv3_up(w1[0, 4]*p3_in + w1[1, 4]*self.p3_upsample(p4_up))
+#
+#        p4_out = self.conv4_down(w2[0, 0]*P4_in+w2[1, 0]*p4_up + w2[2, 0]*self.p4_downsample(p3_out))
+#        p5_out = self.conv5_down(w2[0, 1]*P5_in+w2[1, 1]*p5_up + w2[2, 1]*self.p5_downsample(p4_out))
+#        p6_out = self.conv6_down(w2[0, 2]*P6_in+w2[1, 2]*p6_up + w2[2, 2]*self.p6_downsample(p5_out))
+#        p7_out = self.conv7_down(w1[0, 0]*P7_in + w1[1, 0]*self.p7_downsample(p6_out))
+#        return p3_out, p4_out, p5_out, p6_out, p7_out 
+#
+#
+#
+#if __name__=='__main__':
+#    p3 = torch.randn(5, 32, 64, 64)
+#    p4 = torch.randn(5, 32, 32, 32)
+#    p5 = torch.randn(5, 32, 16, 16)
+#    p6 = torch.randn(5, 32, 8, 8)
+#    p7 = torch.randn(5, 32, 4, 4)
+#    inputs = [p3, p4, p5, p6, p7]
+#    model = BiFPN(32)
+#    output = model(inputs)
+#    for out in output:
+#        print(out.size())
+#
+#
+#

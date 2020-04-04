@@ -35,6 +35,7 @@ python demo.py --weight ./checkpoint_VOC_efficientdet-d1_97.pth --threshold 0.6 
 &nbsp;
 
 ## Recent Update
+ - [06/01/2020] Support both DistributedDataParallel and DataParallel, change augmentation, eval_voc
  - [17/12/2019] Add Fast normalized fusion, Augmentation with Ratio, Change RetinaHead, Fix Support EfficientDet-D0->D7
  - [7/12/2019] Support EfficientDet-D0, EfficientDet-D1, EfficientDet-D2, EfficientDet-D3, EfficientDet-D4,... . Support change gradient accumulation steps, AdamW.
 ## Benchmarking
@@ -43,9 +44,9 @@ We benchmark our code thoroughly on three datasets: pascal voc and coco, using f
 
 1). PASCAL VOC 2007 (Train/Test: 07trainval/07test, scale=600, ROI Align)
 
-model    | #GPUs | batch size | lr        | lr_decay | max_epoch     |  time/epoch | mem/GPU | mAP
----------|--------|-----|--------|-----|-----|-------|--------|-----
-[EfficientDet-D1(with Weight)](https://drive.google.com/open?id=1evKg_s2kTYG-AUeVvlq9cliEEHlJ9TQQ) | 2 | 16 | 1e-4 | 30   | 100   |  20.min | 20100 MB   | updating
+model    | mAP |
+---------|--------|
+[EfficientDet-D0(with Weight)](https://drive.google.com/file/d/1r7MAyBfG5OK_9F_cU8yActUWxTHOuOpL/view?usp=sharing | 62.16
 
 
 ## Installation
@@ -76,12 +77,11 @@ sh datasets/scripts/VOC2012.sh
 ### COCO
 Microsoft COCO: Common Objects in Context
 
-##### Download COCO 2014
+##### Download COCO 2017
 ```Shell
 # specify a directory for dataset to be downloaded into, else default is ~/data/
-sh datasets/scripts/COCO2014.sh
+sh datasets/scripts/COCO2017.sh
 ```
-**Note**: Read dataset COCO will support soon.
 
 ## Training EfficientDet
 
@@ -93,18 +93,27 @@ python train.py --network effcientdet-d0  # Example
 
   - With VOC Dataset:
   ```Shell
-  python train.py --dataset VOC --dataset_root /root/data/VOCdevkit/ --network effcientdet-d0 --batch_size 32 # Example
+  # DataParallel
+  python train.py --dataset VOC --dataset_root /root/data/VOCdevkit/ --network effcientdet-d0 --batch_size 32 
+  # DistributedDataParallel with backend nccl
+  python train.py --dataset VOC --dataset_root /root/data/VOCdevkit/ --network effcientdet-d0 --batch_size 32 --multiprocessing-distributed
   ```
   - With COCO Dataset:
   ```Shell
-  python train.py --dataset COCO --dataset_root /root/data/coco/ --network effcientdet-d0 --batch_size 32 # Example
+  # DataParallel
+  python train.py --dataset COCO --dataset_root ~/data/coco/ --network effcientdet-d0 --batch_size 32
+  # DistributedDataParallel with backend nccl
+  python train.py --dataset COCO --dataset_root ~/data/coco/ --network effcientdet-d0 --batch_size 32 --multiprocessing-distributed
   ```
 
 ## Evaluation
 To evaluate a trained network:
-```Shell
-python eval.py
-```
+ - With VOC Dataset:
+    ```Shell
+    python eval_voc.py --dataset_root ~/data/VOCdevkit --weight ./checkpoint_VOC_efficientdet-d0_261.pth
+    ```
+- With COCO Dataset
+comming soon.
 ## Demo
 
 ```Shell

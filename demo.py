@@ -1,3 +1,4 @@
+import os 
 import torch
 import cv2
 from PIL import Image
@@ -40,30 +41,62 @@ class Detect(object):
 
     def __init__(self, weights, num_class=21, network='efficientdet-d0', size_image=(512, 512)):
         super(Detect,  self).__init__()
-        self.weights = weights
+        self.weight = weights
         self.size_image = size_image
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else 'cpu')
         self.transform = get_augumentation(phase='test')
-        if(self.weights is not None):
-            print('Load pretrained Model')
-            checkpoint = torch.load(
-                self.weights, map_location=lambda storage, loc: storage)
-            num_class = checkpoint['num_class']
-            network = checkpoint['network']
 
-        self.model = EfficientDet(num_classes=num_class,
-                     network=network,
-                     W_bifpn=EFFICIENTDET[network]['W_bifpn'],
-                     D_bifpn=EFFICIENTDET[network]['D_bifpn'],
-                     D_class=EFFICIENTDET[network]['D_class'],
-                     is_training=False
-                     )
+        checkpoint = []
+        gpu = None
+        if(self.weight is not None):
+            if os.path.isfile(args.weight):
+                print("=> loading checkpoint '{}'".format(args.weight))
+                if gpu is None:
+                    checkpoint = torch.load(args.weight)
+                else:
+                    # Map model to be loaded to specified single gpu.
+                    loc = 'cuda:{}'.format(args.gpu)
+                    checkpoint = torch.load(args.weight, map_location=loc)
+        params = checkpoint['parser']
+        args.num_class = params.num_class
+        args.network = params.network
+        args.start_epoch = checkpoint['epoch'] + 1
+        print('params: ', params)
+        del params
+        self.model = EfficientDet(num_classes=args.num_class,
+                         network=args.network,
+                         W_bifpn=EFFICIENTDET[args.network]['W_bifpn'],
+                         D_bifpn=EFFICIENTDET[args.network]['D_bifpn'],
+                         D_class=EFFICIENTDET[args.network]['D_class'],
+                         is_training=False,
+                         threshold = args.threshold,
+                         iou_threshold= args.iou_threshold
+                         )
+        if(self.weight is not None):
+            self.model.load_state_dict(checkpoint['state_dict'])
+        del checkpoint
+        # if(self.weights is not None):
+        #     print('Load pretrained Model')
+        #     checkpoint = torch.load(
+        #         self.weights, map_location=lambda storage, loc: storage)
+        #     params = checkpoint['parser']
+        #     num_class = params.num_class
+        #     network = params.network
 
-        if(self.weights is not None):
-            state_dict = checkpoint['state_dict']
-            self.model.load_state_dict(state_dict)
-        self.model = self.model.cuda()
+        # self.model = EfficientDet(num_classes=num_class,
+        #                           network=network,
+        #                           W_bifpn=EFFICIENTDET[network]['W_bifpn'],
+        #                           D_bifpn=EFFICIENTDET[network]['D_bifpn'],
+        #                           D_class=EFFICIENTDET[network]['D_class'],
+        #                           is_training=False
+        #                           )
+
+        # if(self.weights is not None):
+        #     state_dict = checkpoint['state_dict']
+            # self.model.load_state_dict(state_dict)
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
         self.model.eval()
 
     def process(self, file_name=None, img=None, show=False):
@@ -122,6 +155,7 @@ class Detect(object):
             if show:
                 fig, ax = vis_bbox(img=origin_img, bbox=bboxes,
                                    label=labels, score=bbox_scores)
+                print('Write file at here {}'.format("./docs/demo.png"))
                 fig.savefig('./docs/demo.png')
                 plt.show()
             else:
