@@ -7,11 +7,12 @@ from models import EfficientDet
 from torchvision import transforms
 import numpy as np
 import skimage
-from datasets import get_augumentation, VOC_CLASSES
+from datasets import VOC_CLASSES, demoNormalizer, demoResizer
 from timeit import default_timer as timer
 import argparse
 import copy
 from utils import vis_bbox, EFFICIENTDET
+
 
 parser = argparse.ArgumentParser(description='EfficientDet')
 
@@ -45,7 +46,8 @@ class Detect(object):
         self.size_image = size_image
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else 'cpu')
-        self.transform = get_augumentation(phase='test')
+        # self.transform = get_augumentation(phase='test')
+        self.transform = transforms.Compose([demoNormalizer(), demoResizer()])
 
         checkpoint = []
         gpu = None
@@ -76,25 +78,6 @@ class Detect(object):
         if(self.weight is not None):
             self.model.load_state_dict(checkpoint['state_dict'])
         del checkpoint
-        # if(self.weights is not None):
-        #     print('Load pretrained Model')
-        #     checkpoint = torch.load(
-        #         self.weights, map_location=lambda storage, loc: storage)
-        #     params = checkpoint['parser']
-        #     num_class = params.num_class
-        #     network = params.network
-
-        # self.model = EfficientDet(num_classes=num_class,
-        #                           network=network,
-        #                           W_bifpn=EFFICIENTDET[network]['W_bifpn'],
-        #                           D_bifpn=EFFICIENTDET[network]['D_bifpn'],
-        #                           D_class=EFFICIENTDET[network]['D_class'],
-        #                           is_training=False
-        #                           )
-
-        # if(self.weights is not None):
-        #     state_dict = checkpoint['state_dict']
-            # self.model.load_state_dict(state_dict)
         if torch.cuda.is_available():
             self.model = self.model.cuda()
         self.model.eval()
@@ -103,8 +86,9 @@ class Detect(object):
         if file_name is not None:
             img = cv2.imread(file_name)
         origin_img = copy.deepcopy(img)
-        augmentation = self.transform(image=img)
-        img = augmentation['image']
+        # augmentation = self.transform(image=img)
+        # img = augmentation['image']
+        img = self.transform(img)
         img = img.to(self.device)
         img = img.unsqueeze(0)
 

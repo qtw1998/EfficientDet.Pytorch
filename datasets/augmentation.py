@@ -114,6 +114,26 @@ class Resizer(object):
 
         return {'img': torch.from_numpy(new_image), 'annot': torch.from_numpy(annots), 'scale': scale}
 
+class demoResizer(object):
+    """Convert ndarrays in sample to Tensors."""
+
+    def __call__(self, image, common_size=512):
+        height, width, _ = image.shape
+        if height > width:
+            scale = common_size / height
+            resized_height = common_size
+            resized_width = int(width * scale)
+        else:
+            scale = common_size / width
+            resized_height = int(height * scale)
+            resized_width = common_size
+
+        image = cv2.resize(image, (resized_width, resized_height))
+
+        new_image = np.zeros((common_size, common_size, 3))
+        new_image[0:resized_height, 0:resized_width] = image
+
+        return torch.from_numpy(new_image)
 
 class Augmenter(object):
     """Convert ndarrays in sample to Tensors."""
@@ -148,3 +168,13 @@ class Normalizer(object):
         image, annots = sample['img'], sample['annot']
 
         return {'img': ((image.astype(np.float32) - self.mean) / self.std), 'annot': annots}
+
+class demoNormalizer(object):
+    
+    def __init__(self):
+        self.mean = np.array([[[0.485, 0.456, 0.406]]])
+        self.std = np.array([[[0.229, 0.224, 0.225]]])
+
+    def __call__(self, image):
+
+        return (image.astype(np.float32) - self.mean) / self.std

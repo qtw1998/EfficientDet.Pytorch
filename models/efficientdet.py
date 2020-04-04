@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
 import math
-from models.efficientnet import EfficientNet
+from models.efficientnet import ModifyEfficientNet
 from models.bifpn import BiFPN
-from .retinahead import RetinaHead
 from models.module import RegressionModel, ClassificationModel, Anchors, ClipBoxes, BBoxTransform
 from torchvision.ops import nms
 from .losses import FocalLoss
@@ -30,7 +29,7 @@ class EfficientDet(nn.Module):
                  threshold=0.01,
                  iou_threshold=0.5):
         super(EfficientDet, self).__init__()
-        self.backbone = EfficientNet.from_pretrained(MODEL_MAP[network])
+        self.backbone = ModifyEfficientNet.from_pretrained(MODEL_MAP[network])
         self.is_training = is_training
         in_channels = self.backbone.get_list_features()
         self.conv3 = nn.Conv2d(in_channels[0], W_bifpn, kernel_size=1, stride=1, padding=0)
