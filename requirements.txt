@@ -3,4 +3,5 @@ pandas
 torch
 torchvision
 pytoan
+efficientnet_pytorch
 albumentations

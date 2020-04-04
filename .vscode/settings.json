@@ -1,4 +1,4 @@
 {
-    "python.pythonPath": "/home/toandm2/devtools/anaconda3/envs/pytoan/bin/python",
+    "python.pythonPath": "/cluster/home/qiaotianwei/.conda/envs/qtw1998/bin/python",
     "git.ignoreLimitWarning": true
 }

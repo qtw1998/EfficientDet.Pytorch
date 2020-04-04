@@ -5,4 +5,5 @@ jobs:
    - image: toandaominh1997/pytoan:latest
   steps:
    - checkout # check out the code in the project directory
+   - run: pip install -r requirements.txt
    - run: python test.py
