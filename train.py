@@ -272,14 +272,14 @@ def main_worker(gpu, ngpus_per_node, args):
         model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) , optimizer, scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=3, verbose=True)
+    # optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = optim.RMSprop(model.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
     cudnn.benchmark = True
 
     for epoch in range(args.start_epoch, args.num_epoch):
         loss = train(train_loader, model, scheduler, optimizer, epoch, args)
-
+        
         if (epoch + 1) % 10 == 0:
             mAP = test(valid_dataset, model, epoch, args)
             writer.add_hparams({'epoch': epoch, 'lr': optimizer.param_groups[0]['lr'], 'batch_size': args.batch_size},

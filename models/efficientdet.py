@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 from models.efficientnet import ModifyEfficientNet
 from models.bifpn import BiFPN
-from models.module import RegressionModel, ClassificationModel, Anchors, ClipBoxes, BBoxTransform
+from models.module import Regressor, Classifier, Anchors, ClipBoxes, BBoxTransform
 from torchvision.ops import nms
 from .losses import FocalLoss
 MODEL_MAP = {
@@ -36,12 +36,11 @@ class EfficientDet(nn.Module):
         self.conv4 = nn.Conv2d(in_channels[1], W_bifpn, kernel_size=1, stride=1, padding=0)
         self.conv5 = nn.Conv2d(in_channels[2], W_bifpn, kernel_size=1, stride=1, padding=0)
         self.conv6 = nn.Conv2d(in_channels[2], W_bifpn, kernel_size=3, stride=2, padding=1)
-        self.conv7 = nn.Sequential(nn.ReLU(),
-                                        nn.Conv2d(W_bifpn, W_bifpn, kernel_size=3, stride=2, padding=1))
+        self.conv7 = nn.Sequential(nn.ReLU(), nn.Conv2d(W_bifpn, W_bifpn, kernel_size=3, stride=2, padding=1))
         self.neck = nn.Sequential(*[BiFPN(num_channels = W_bifpn) for _ in range(D_bifpn)])
         
-        self.regressionModel = RegressionModel(W_bifpn)
-        self.classificationModel = ClassificationModel(W_bifpn, num_classes=num_classes)
+        self.regressor = Regressor(in_channels=W_bifpn, num_layers = 3 + (D_bifpn-2)//3)
+        self.classifier = Classifier(in_channels=W_bifpn, num_classes=num_classes, num_layers = 3 + (D_bifpn-2)//3)
 
 
         self.anchors = Anchors()
@@ -60,14 +59,12 @@ class EfficientDet(nn.Module):
                 m.bias.data.zero_()
 
         prior = 0.01
+        self.classifier.header.weight.data.fill_(0)
+        self.classifier.header.bias.data.fill_(-math.log((1.0 - prior) / prior))
 
-        self.classificationModel.output.weight.data.fill_(0)
-        self.classificationModel.output.bias.data.fill_(-math.log((1.0 - prior) / prior))
+        self.regressor.header.weight.data.fill_(0)
+        self.regressor.header.bias.data.fill_(0)
 
-        self.regressionModel.output.weight.data.fill_(0)
-        self.regressionModel.output.bias.data.fill_(0)
-
-        self.freeze_bn()
 
     def forward(self, inputs):
         if self.is_training:
@@ -82,9 +79,9 @@ class EfficientDet(nn.Module):
         p7 = self.conv7(p6)
         features = self.neck([p3, p4, p5, p6, p7])
 
-        regression = torch.cat([self.regressionModel(feature) for feature in features], dim=1)
+        regression = torch.cat([self.regressor(feature) for feature in features], dim=1)
 
-        classification = torch.cat([self.classificationModel(feature) for feature in features], dim=1)
+        classification = torch.cat([self.classifier(feature) for feature in features], dim=1)
 
         anchors = self.anchors(inputs)
         if self.is_training:
@@ -104,8 +101,7 @@ class EfficientDet(nn.Module):
             scores = scores[:, scores_over_thresh, :]
             anchors_nms_idx = nms(
                 transformed_anchors[0, :, :], scores[0, :, 0], iou_threshold=self.iou_threshold)
-            nms_scores, nms_class = classification[0, anchors_nms_idx, :].max(
-                dim=1)
+            nms_scores, nms_class = classification[0, anchors_nms_idx, :].max(dim=1)
             return [nms_scores, nms_class, transformed_anchors[0, anchors_nms_idx, :]]
 
     def freeze_bn(self):
